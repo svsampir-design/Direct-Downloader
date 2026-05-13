@@ -56,7 +56,7 @@ jobs:
           echo "📥 دانلود: $FILENAME"
           
           # دانلود با curl
-          curl -L --retry 3 --retry-delay 5 -A "Mozilla/5.0" -o "/tmp/$FILENAME" "$URL"
+          curl -L -K --retry 3 --retry-delay 5 -A "Mozilla/5.0" -o "/tmp/$FILENAME" "$URL"
           
           if [ -f "/tmp/$FILENAME" ] && [ -s "/tmp/$FILENAME" ]; then
               SIZE=$(du -h "/tmp/$FILENAME" | cut -f1)
