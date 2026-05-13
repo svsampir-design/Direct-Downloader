@@ -1,4 +1,4 @@
-name: 📥 Direct Downloader
+name: 📥 Direct Downloader Pro
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
         type: string
         default: ''
       split_mb:
-        description: '📦 تکه > MB (0=نه)'
+        description: '📦 تکه > MB'
         required: false
         type: number
         default: 70
@@ -31,7 +31,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 📥 دانلود
+      - name: 📥 دانلود و پردازش
         env:
           URL: ${{ github.event.inputs.url }}
           FILENAME: ${{ github.event.inputs.filename }}
@@ -41,56 +41,59 @@ jobs:
           FILENAME="$FILENAME"
           SPLIT_MB="$SPLIT_MB"
           
-          # اسم فایل
+          # اسم فایل رو از لینک یا ورودی بگیر
           if [ -z "$FILENAME" ]; then
-              FILENAME=$(echo "$URL" | sed 's/[?#].*//' | sed 's/.*\///' | sed 's/%20/ /g')
+              FILENAME=$(basename "$URL" | sed 's/[?#].*//; s/%20/ /g')
           fi
           [ -z "$FILENAME" ] && FILENAME="download_$(date +%s)"
+
+          echo "📥 شروع دانلود: $FILENAME"
+
+          # دانلود هوشمند: اول wget، اگه نشد curl ساده
+          wget --no-check-certificate --max-redirect=20 -O "/tmp/$FILENAME" "$URL" 2>/dev/null || \
+          curl -L -k -o "/tmp/$FILENAME" "$URL"
           
-          echo "📥 دانلود: $FILENAME"
-          
-          # دانلود (ساده و بدون خطا)
-          curl -L -k -o "/tmp/$FILENAME" "$URL" -A "Mozilla/5.0"
-          
+          # بررسی موفقیت دانلود
           if [ -f "/tmp/$FILENAME" ] && [ -s "/tmp/$FILENAME" ]; then
               SIZE=$(du -h "/tmp/$FILENAME" | cut -f1)
-              echo "✅ دانلود شد: $SIZE"
+              echo "✅ دانلود موفق: $SIZE"
               
+              # آماده‌سازی پوشه خروجی
               NAME=$(echo "$FILENAME" | sed 's/\.[^.]*$//' | tr ' ' '_')
               OUT_DIR="downloads/$NAME"
               mkdir -p "$OUT_DIR"
               mv "/tmp/$FILENAME" "$OUT_DIR/"
               
+              # بررسی حجم و تکه‌تکه کردن
               SIZE_BYTES=$(stat -c%s "$OUT_DIR/$FILENAME")
               SIZE_MB=$((SIZE_BYTES / 1048576))
-              echo "📦 $SIZE_MB MB"
               
-              # تیکه‌تکه کردن
               if [ "$SPLIT_MB" -gt 0 ] && [ "$SIZE_MB" -gt "$SPLIT_MB" ]; then
-                  echo "✂️ تیکه..."
+                  echo "✂️ در حال تکه‌تکه کردن فایل..."
                   cd "$OUT_DIR"
-                  zip -j -s ${SPLIT_MB}m "$NAME.zip" "$FILENAME"
-                  rm "$FILENAME"
+                  zip -j -s ${SPLIT_MB}m "$NAME.zip" "$FILENAME" && rm "$FILENAME"
                   cd -
                   
+                  # ساخت README برای راهنمایی
                   echo "# 📦 $NAME" > "$OUT_DIR/README.md"
+                  echo "فایل به دلیل حجم بالا تکه‌تکه شده. همه بخش‌ها را دانلود کنید." >> "$OUT_DIR/README.md"
                   echo "" >> "$OUT_DIR/README.md"
-                  echo "| # | File |" >> "$OUT_DIR/README.md"
+                  echo "| # | فایل |" >> "$OUT_DIR/README.md"
                   echo "|---|------|" >> "$OUT_DIR/README.md"
                   for PART in $(ls "$OUT_DIR" | grep -v README | sort); do
                       echo "|   | $PART |" >> "$OUT_DIR/README.md"
                   done
               fi
           else
-              echo "❌ دانلود ناموفق!"
+              echo "❌ دانلود ناموفق بود!"
               exit 1
           fi
 
-      - name: 📤 آپلود
+      - name: 📤 آپلود نتیجه
         run: |
           git config user.name "bot"
           git config user.email "bot@github.com"
           git add downloads/ 2>/dev/null
           git diff --cached --quiet && exit 0
-          git commit -m "📥 ${FILENAME:0:50}" --quiet
+          git commit -m "📥 دانلود فایل: ${FILENAME:0:50}" --quiet
           git push --quiet 2>/dev/null || git push --quiet 2>/dev/null || git push --quiet 2>/dev/null
