@@ -13,7 +13,7 @@ on:
         type: string
         default: ''
       split_mb:
-        description: '📦 تکه > MB'
+        description: '📦 تکه > MB (0=نه)'
         required: false
         type: number
         default: 70
@@ -31,12 +31,6 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🛠️ نصب
-        run: |
-          sudo apt-get update -qq 2>/dev/null || true
-          sudo apt-get install -y -qq curl zip 2>/dev/null || true
-          echo "✅ آماده!"
-
       - name: 📥 دانلود
         env:
           URL: ${{ github.event.inputs.url }}
@@ -47,53 +41,44 @@ jobs:
           FILENAME="$FILENAME"
           SPLIT_MB="$SPLIT_MB"
           
-          # استخراج اسم فایل از URL
+          # اسم فایل
           if [ -z "$FILENAME" ]; then
-              FILENAME=$(basename "$URL" | sed 's/[?#].*//' | sed 's/%20/ /g')
+              FILENAME=$(echo "$URL" | sed 's/[?#].*//' | sed 's/.*\///' | sed 's/%20/ /g')
           fi
           [ -z "$FILENAME" ] && FILENAME="download_$(date +%s)"
           
           echo "📥 دانلود: $FILENAME"
           
-          # دانلود با curl
-          curl -L -K --retry 3 --retry-delay 5 -A "Mozilla/5.0" -o "/tmp/$FILENAME" "$URL"
+          # دانلود (ساده و بدون خطا)
+          curl -L -k -o "/tmp/$FILENAME" "$URL" -A "Mozilla/5.0"
           
           if [ -f "/tmp/$FILENAME" ] && [ -s "/tmp/$FILENAME" ]; then
               SIZE=$(du -h "/tmp/$FILENAME" | cut -f1)
               echo "✅ دانلود شد: $SIZE"
               
-              # ساخت پوشه
               NAME=$(echo "$FILENAME" | sed 's/\.[^.]*$//' | tr ' ' '_')
               OUT_DIR="downloads/$NAME"
               mkdir -p "$OUT_DIR"
-              
-              # انتقال فایل
               mv "/tmp/$FILENAME" "$OUT_DIR/"
-              FILEPATH="$OUT_DIR/$FILENAME"
-              SIZE_MB=$(stat -c%s "$FILEPATH")
-              SIZE_MB=$((SIZE_MB / 1048576))
               
+              SIZE_BYTES=$(stat -c%s "$OUT_DIR/$FILENAME")
+              SIZE_MB=$((SIZE_BYTES / 1048576))
               echo "📦 $SIZE_MB MB"
               
               # تیکه‌تکه کردن
               if [ "$SPLIT_MB" -gt 0 ] && [ "$SIZE_MB" -gt "$SPLIT_MB" ]; then
-                  echo "✂️ تیکه‌تکه (${SPLIT_MB}MB)..."
-                  zip -j -s ${SPLIT_MB}m "$OUT_DIR/$NAME.zip" "$FILEPATH"
-                  rm "$FILEPATH"
+                  echo "✂️ تیکه..."
+                  cd "$OUT_DIR"
+                  zip -j -s ${SPLIT_MB}m "$NAME.zip" "$FILENAME"
+                  rm "$FILENAME"
+                  cd -
                   
-                  # ساخت README
-                  echo "# $NAME" > "$OUT_DIR/README.md"
+                  echo "# 📦 $NAME" > "$OUT_DIR/README.md"
                   echo "" >> "$OUT_DIR/README.md"
-                  echo "| # | File | Link |" >> "$OUT_DIR/README.md"
-                  echo "|---|------|------|" >> "$OUT_DIR/README.md"
-                  
-                  REPO="${{ github.repository }}"
-                  BRANCH="${{ github.ref_name }}"
-                  N=1
+                  echo "| # | File |" >> "$OUT_DIR/README.md"
+                  echo "|---|------|" >> "$OUT_DIR/README.md"
                   for PART in $(ls "$OUT_DIR" | grep -v README | sort); do
-                      ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$PART'))" 2>/dev/null || echo "$PART")
-                      echo "| $N | $PART | [Download](https://github.com/$REPO/raw/$BRANCH/downloads/$NAME/$ENC) |" >> "$OUT_DIR/README.md"
-                      N=$((N+1))
+                      echo "|   | $PART |" >> "$OUT_DIR/README.md"
                   done
               fi
           else
@@ -105,8 +90,7 @@ jobs:
         run: |
           git config user.name "bot"
           git config user.email "bot@github.com"
-          mkdir -p downloads
           git add downloads/ 2>/dev/null
           git diff --cached --quiet && exit 0
           git commit -m "📥 ${FILENAME:0:50}" --quiet
-          for i in 1 2 3; do git pull --rebase --quiet && git push --quiet && exit 0; sleep 3; done
+          git push --quiet 2>/dev/null || git push --quiet 2>/dev/null || git push --quiet 2>/dev/null
