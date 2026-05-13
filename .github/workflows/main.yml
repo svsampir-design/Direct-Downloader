@@ -1,4 +1,4 @@
-name: 🌐 Search & Download
+name: 🌐 Search, Fetch & Download
 
 on:
   workflow_dispatch:
@@ -9,14 +9,20 @@ on:
         type: choice
         options:
           - search (جستجوی وب)
-          - scrape (استخراج و دانلود از صفحه)
+          - fetch (واکشی صفحه و استخراج لینک‌ها)
+          - download (دانلود مستقیم)
         default: 'search (جستجوی وب)'
       query:
-        description: '🔍 عبارت جستجو | 🌐 لینک صفحه'
+        description: '🔍 عبارت | 🌐 لینک صفحه | 🔗 لینک مستقیم'
         required: true
         type: string
+      filename:
+        description: '📝 اسم فایل (فقط برای دانلود)'
+        required: false
+        type: string
+        default: ''
       max_items:
-        description: '🔢 حداکثر نتایج/فایل'
+        description: '🔢 حداکثر نتایج'
         required: false
         type: number
         default: 10
@@ -28,9 +34,9 @@ on:
 
 jobs:
   main:
-    name: ⚡️ جستجو و دانلود
+    name: ⚡️ همه‌کاره
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     permissions:
       contents: write
     
@@ -50,26 +56,27 @@ jobs:
         env:
           MODE: ${{ github.event.inputs.mode }}
           QUERY: ${{ github.event.inputs.query }}
+          FILENAME: ${{ github.event.inputs.filename }}
           MAX: ${{ github.event.inputs.max_items }}
           SPLIT_MB: ${{ github.event.inputs.split_mb }}
         run: |
           python3 << 'PYEOF'
-          import os, re, sys, subprocess
+          import os, sys, re, subprocess
           from pathlib import Path
           from datetime import datetime
-          from urllib.parse import quote_plus, urljoin
+          from urllib.parse import urljoin, urlparse
           import requests
           from bs4 import BeautifulSoup
 
           mode = os.environ['MODE']
           query = os.environ['QUERY'].strip()
+          filename = os.environ.get('FILENAME', '')
           max_items = int(os.environ.get('MAX', 10))
           split_mb = int(os.environ.get('SPLIT_MB', 70))
-
           H = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
           # ========================
-          #  MODE 1: SEARCH (DuckDuckGo)
+          #  MODE 1: SEARCH (باگ fix)
           # ========================
           if mode == 'search (جستجوی وب)':
               print(f'🔍 جستجو: {query}')
@@ -78,15 +85,40 @@ jobs:
                   soup = BeautifulSoup(resp.text, 'html.parser')
                   results = []
                   for item in soup.select('.result')[:max_items]:
-                      a = item.select_one('.result__title a, .result__url')
+                      title_elem = item.select_one('.result__title a')
+                      if not title_elem:
+                          title_elem = item.select_one('.result__title')
+                      if not title_elem:
+                          continue
+                      
+                      title = title_elem.get_text(strip=True)[:80]
+                      link = ''
+                      
+                      # لینک: اول href مستقیم
+                      if title_elem.get('href'):
+                          link = title_elem.get('href')
+                      else:
+                          # لینک داخل متن
+                          link_match = re.search(r'https?://[^\s]+', title_elem.get_text())
+                          if link_match:
+                              link = link_match.group(0)
+                      
+                      # اگر هنوز link خالیه
+                      if not link:
+                          link_elem = item.select_one('a[href]')
+                          if link_elem:
+                              link = link_elem.get('href', '')
+                      
+                      # تمیز کردن لینک DuckDuckGo
+                      if 'uddg=' in link:
+                          link = link.split('uddg=')[-1].split('&')[0]
+                          link = requests.utils.unquote(link)
+                      
+                      # دیسکریپشن
                       snippet = item.select_one('.result__snippet')
-                      if a:
-                          title = a.get_text(strip=True)[:80]
-                          link = a.get('href', '')
-                          if 'uddg=' in link:
-                              link = link.split('uddg=')[-1].split('&')[0]
-                              link = requests.utils.unquote(link)
-                          desc = snippet.get_text(strip=True)[:150] if snippet else ''
+                      desc = snippet.get_text(strip=True)[:150] if snippet else ''
+                      
+                      if link:
                           results.append({'title': title, 'url': link, 'desc': desc})
                   
                   if results:
@@ -103,90 +135,84 @@ jobs:
                       print('😞 هیچی پیدا نشد')
 
           # ========================
-          #  MODE 2: SCRAPE (استخراج و دانلود)
+          #  MODE 2: FETCH
           # ========================
-          elif mode == 'scrape (استخراج و دانلود از صفحه)':
-              url = query
-              if not url.startswith('http'):
-                  url = 'https://' + url
-              
-              print(f'🕷️ بررسی: {url}')
-              resp = requests.get(url, headers=H, timeout=15, allow_redirects=True)
-              if resp.status_code != 200:
-                  print(f'❌ خطای {resp.status_code}')
-                  sys.exit(1)
-              
-              soup = BeautifulSoup(resp.text, 'html.parser')
-              base = resp.url
-              links = set()
-              
-              # شکار ویدیوها
-              for tag in soup.find_all(['video', 'source']):
-                  src = tag.get('src', '')
-                  if src and not src.startswith('data:'):
-                      links.add(urljoin(base, src))
-              
-              # شکار iframe
-              for iframe in soup.find_all('iframe'):
-                  src = iframe.get('src', '')
-                  if src:
-                      try:
-                          ir = requests.get(urljoin(base, src), headers=H, timeout=10)
-                          if ir.status_code == 200:
-                              isoup = BeautifulSoup(ir.text, 'html.parser')
-                              for t in isoup.find_all(['video', 'source']):
-                                  s = t.get('src', '')
-                                  if s and not s.startswith('data:'):
-                                      links.add(urljoin(ir.url, s))
-                      except: pass
-              
-              # لینک‌های مستقیم
-              for a in soup.find_all('a', href=True):
-                  href = urljoin(base, a['href'])
-                  if any(href.lower().endswith(ext) for ext in ['.mp4','.webm','.mkv','.avi','.mov','.zip','.pdf','.exe','.rar','.7z']):
-                      links.add(href)
-              
-              # Regex
-              found = re.findall(r'https?://[^\s"\'<>]+\.(?:mp4|webm|mkv|avi|mov|zip|pdf|exe|rar|7z)[^\s"\'<>]*', resp.text)
-              for f in found:
-                  if len(f) < 500:
-                      links.add(f)
-              
-              links = list(links)[:max_items]
-              if not links:
-                  print('😞 هیچی پیدا نشد')
-                  sys.exit(1)
-              
-              print(f'🎯 {len(links)} فایل پیدا شد. درحال دانلود...')
-              for i, link in enumerate(links, 1):
-                  name = link.split('/')[-1].split('?')[0] or f'file_{i}'
-                  safe_name = re.sub(r'[<>:"/\\|?*]', '_', name.rsplit('.', 1)[0])[:40]
-                  out_dir = Path(f'downloads/{safe_name}')
+          elif mode == 'fetch (واکشی صفحه و استخراج لینک‌ها)':
+              url = query if query.startswith('http') else 'https://' + query
+              print(f'🕷️ واکشی: {url}')
+              try:
+                  resp = requests.get(url, headers=H, timeout=15, allow_redirects=True)
+                  if resp.status_code != 200:
+                      print(f'❌ خطای {resp.status_code}')
+                      sys.exit(1)
+                  
+                  soup = BeautifulSoup(resp.text, 'html.parser')
+                  base_url = resp.url
+                  domain = urlparse(base_url).netloc.replace(':', '_')
+                  ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                  out_dir = Path(f'fetched/{domain}_{ts}')
                   out_dir.mkdir(parents=True, exist_ok=True)
-                  fpath = out_dir / name
                   
-                  print(f'📥 [{i}/{len(links)}] {name}')
-                  subprocess.run(['wget', '--no-check-certificate', '--max-redirect=10', '-O', str(fpath), link], check=False, stderr=subprocess.DEVNULL)
+                  # ذخیره HTML
+                  (out_dir / 'page.html').write_text(resp.text, encoding='utf-8')
                   
-                  if fpath.exists() and fpath.stat().st_size > 0:
-                      sz = fpath.stat().st_size / 1e6
-                      print(f'   ✅ {sz:.1f}MB')
-                      if split_mb > 0 and sz > split_mb:
-                          print(f'   ✂️ تیکه...')
-                          subprocess.run(['zip', '-j', '-s', f'{split_mb}m', str(out_dir / f'{safe_name}.zip'), str(fpath)], check=False)
-                          if list(out_dir.glob(f'{safe_name}.z*')):
-                              fpath.unlink()
-                  else:
-                      print(f'   ❌ ناموفق')
-                      if fpath.exists(): fpath.unlink()
+                  # استخراج لینک‌ها
+                  links = set()
+                  for tag in soup.find_all(['a', 'video', 'source', 'iframe']):
+                      href = tag.get('href') or tag.get('src')
+                      if href and not href.startswith('data:') and not href.startswith('javascript:'):
+                          links.add(urljoin(base_url, href))
+                  
+                  found = re.findall(r'https?://[^\s"\'<>]+', resp.text)
+                  for f in found:
+                      if len(f) < 500:
+                          links.add(f)
+                  
+                  with open(out_dir / 'links.txt', 'w') as lf:
+                      lf.write(f'لیست لینک‌ها از:\n{base_url}\n')
+                      lf.write('='*60 + '\n\n')
+                      for i, link in enumerate(sorted(links), 1):
+                          lf.write(f'{i}. {link}\n')
+                  
+                  print(f'✅ {out_dir}')
+                  print(f'📄 {len(links)} لینک')
+              except Exception as e:
+                  print(f'❌ {e}')
+
+          # ========================
+          #  MODE 3: DOWNLOAD
+          # ========================
+          elif mode == 'download (دانلود مستقیم)':
+              url = query if query.startswith('http') else 'https://' + query
+              fname = filename if filename else url.split('/')[-1].split('?')[0] or f'file_{datetime.now().strftime("%H%M%S")}'
+              fname = fname.replace(' ', '_')
+              
+              print(f'📥 {fname}')
+              safe_name = re.sub(r'[<>:"/\\|?*]', '_', fname.rsplit('.', 1)[0])[:40]
+              out_dir = Path(f'downloads/{safe_name}')
+              out_dir.mkdir(parents=True, exist_ok=True)
+              fpath = out_dir / fname
+              
+              subprocess.run(['wget', '--no-check-certificate', '--max-redirect=10', '-O', str(fpath), url], check=False)
+              
+              if fpath.exists() and fpath.stat().st_size > 0:
+                  sz = fpath.stat().st_size / 1e6
+                  print(f'✅ {sz:.1f}MB')
+                  if split_mb > 0 and sz > split_mb:
+                      print(f'✂️ تیکه...')
+                      subprocess.run(['zip', '-j', '-s', f'{split_mb}m', str(out_dir / f'{safe_name}.zip'), str(fpath)], check=False)
+                      if list(out_dir.glob(f'{safe_name}.z*')):
+                          fpath.unlink()
+              else:
+                  print('❌ ناموفق!')
           PYEOF
 
       - name: 📤 آپلود
         run: |
           git config user.name "bot"
           git config user.email "bot@github.com"
-          mkdir -p downloads searches
-          git add downloads/ searches/ 2>/dev/null
+          mkdir -p searches fetched downloads
+          git add searches/ fetched/ downloads/ 2>/dev/null
           git diff --cached --quiet && exit 0
           git commit -m "📦 ${MODE}: ${QUERY:0:50}" --quiet
           git push --quiet 2>/dev/null || git push --quiet 2>/dev/null || git push --quiet 2>/dev/null
